@@ -24,14 +24,18 @@ app.get("/", (req, res) => {
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  socket.on("join-room", (roomId) => {
-    socket.join(roomId);
+  ;
+socket.on("join-room", (roomId) => {
+  socket.join(roomId);
 
-    console.log(`${socket.id} joined room: ${roomId}`);
+  console.log(`${socket.id} joined room: ${roomId}`);
 
-    socket.to(roomId).emit("user-joined", socket.id);
-  });
+  socket.to(roomId).emit("user-joined", socket.id);
+});
 
+socket.on("draw-line", (line) => {
+  socket.broadcast.emit("draw-line", line);
+});
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
   });
