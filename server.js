@@ -1,209 +1,418 @@
-import "dotenv/config";
-import express from "express";
-import http from "http";
-import cors from "cors";
-import { Server } from "socket.io";
-import mongoose from "mongoose";
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const { Server } = require("socket.io");
+const mongoose = require("mongoose");
+const Y = require("yjs");
+require("dotenv").config();
 
 const app = express();
-const server = http.createServer(app);
 
-const PORT = 5000;
-
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Socket.io
+app.get("/", (req, res) => {
+  res.send("SyncSpace Server Running");
+});
+
+const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: "*"
   }
 });
 
-// ===============================
-// BASIC ROUTES
-// ===============================
 
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message: "🚀 SyncSpace Server is Running!"
-  });
-});
+/* =========================
+   MONGODB
+========================= */
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "SyncSpace API is Working!"
-  });
-});
+const sessionSchema = new mongoose.Schema(
+  {
+    roomId: {
+      type: String,
+      required: true,
+      unique: true
+    },
 
-// ===============================
-// SOCKET CONNECTION
-// ===============================
+    yjsState: {
+      type: Buffer,
+      default: Buffer.alloc(0)
+    },
 
-io.on("connection", (socket) => {
-
-  console.log("🟢 User connected:", socket.id);
-
-  // =============================
-  // JOIN ROOM
-  // =============================
-
-  socket.on("join-room", ({ roomId, username }) => {
-
-    if (!roomId || !username) {
-      console.log("Room ID or username missing");
-      return;
+    updatedAt: {
+      type: Date,
+      default: Date.now
     }
+  }
+);
 
-    socket.join(roomId);
+const Session = mongoose.model(
+  "Session",
+  sessionSchema
+);
 
-    socket.data.roomId = roomId;
-    socket.data.username = username;
 
-    console.log(
-      `👤 ${username} joined room: ${roomId}`
-    );
+/* =========================
+   ROOMS
+========================= */
 
-    // Send notification to other users
-    socket.to(roomId).emit("user-joined", {
-      id: socket.id,
-      username: username
-    });
+const rooms = new Map();
 
-  });
 
-  // =============================
-  // CODE EDITOR REAL-TIME SYNC
-  // =============================
+/* =========================
+   CONNECT MONGODB
+========================= */
 
-  socket.on("code-change", ({ roomId, code }) => {
-
-    console.log(
-      `💻 Code updated in room: ${roomId}`
-    );
-
-    socket.to(roomId).emit(
-      "code-change",
-      code
-    );
-
-  });
-
-  // =============================
-  // WHITEBOARD REAL-TIME SYNC
-  // =============================
-
-  socket.on("canvas-update", ({ roomId, canvas }) => {
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => {
 
     console.log(
-      `🎨 Whiteboard updated in room: ${roomId}`
+      "MongoDB Connected Successfully"
     );
 
-    socket.to(roomId).emit(
-      "canvas-update",
-      canvas
-    );
+  })
+  .catch((error) => {
 
-  });
-
-  // =============================
-  // CHAT / MESSAGE SUPPORT
-  // =============================
-
-  socket.on("send-message", ({ roomId, username, message }) => {
-
-    socket.to(roomId).emit("receive-message", {
-      username,
-      message
-    });
-
-  });
-
-  // =============================
-  // USER DISCONNECT
-  // =============================
-
-  socket.on("disconnect", () => {
-
-    console.log(
-      "🔴 User disconnected:",
-      socket.id
-    );
-
-  });
-
-});
-
-// ===============================
-// MONGODB CONNECTION
-// ===============================
-
-async function connectDatabase() {
-
-  try {
-
-    if (!process.env.MONGO_URI) {
-
-      console.log(
-        "⚠️ MONGO_URI not found."
-      );
-
-      console.log(
-        "Running server without MongoDB."
-      );
-
-      return;
-
-    }
-
-    await mongoose.connect(
-      process.env.MONGO_URI
-    );
-
-    console.log(
-      "✅ MongoDB connected successfully!"
-    );
-
-  } catch (error) {
-
-    console.log(
-      "❌ MongoDB connection failed:"
-    );
-
-    console.log(
+    console.error(
+      "MongoDB Connection Error:",
       error.message
     );
 
-  }
-
-}
-
-// ===============================
-// START SERVER
-// ===============================
-
-async function startServer() {
-
-  await connectDatabase();
-
-  server.listen(PORT, () => {
-
-    console.log("");
-    console.log("================================");
-    console.log("🚀 SyncSpace Server Started");
-    console.log("================================");
-    console.log(
-      `🌐 http://localhost:${PORT}`
-    );
-    console.log("================================");
-    console.log("");
-
   });
 
-}
 
-startServer();
+/* =========================
+   SOCKET.IO
+========================= */
+
+io.on("connection", (socket) => {
+
+  console.log(
+    "User connected:",
+    socket.id
+  );
+
+
+  /* =========================
+     JOIN ROOM
+  ========================= */
+
+  socket.on(
+    "join-room",
+    async ({ roomId, userName }) => {
+
+      try {
+
+        if (!roomId || !userName) {
+          return;
+        }
+
+
+        if (!rooms.has(roomId)) {
+          rooms.set(
+            roomId,
+            new Map()
+          );
+        }
+
+
+        const room =
+          rooms.get(roomId);
+
+
+        socket.join(roomId);
+
+        socket.data.roomId =
+          roomId;
+
+        room.set(
+          socket.id,
+          {
+            id: socket.id,
+            name: userName
+          }
+        );
+
+
+        /* =========================
+           LOAD SAVED YJS DATA
+        ========================= */
+
+        const savedSession =
+          await Session.findOne({
+            roomId
+          });
+
+
+        if (
+          savedSession &&
+          savedSession.yjsState &&
+          savedSession.yjsState.length > 0
+        ) {
+
+          socket.emit(
+            "yjs-sync",
+            Buffer.from(
+              savedSession.yjsState
+            ).toString("base64")
+          );
+
+        }
+
+
+        socket.emit(
+          "room-joined",
+          {
+            roomId,
+            userName
+          }
+        );
+
+
+        io.to(roomId).emit(
+          "users-update",
+          Array.from(
+            room.values()
+          )
+        );
+
+
+        console.log(
+          `${userName} joined ${roomId}`
+        );
+
+      } catch (error) {
+
+        console.error(
+          "Join room error:",
+          error
+        );
+
+      }
+
+    }
+  );
+
+
+  /* =========================
+     YJS UPDATE
+  ========================= */
+
+  socket.on(
+    "yjs-update",
+    async ({ roomId, update }) => {
+
+      try {
+
+        if (!roomId || !update) {
+          return;
+        }
+
+
+        const updateBytes =
+          Buffer.from(
+            update,
+            "base64"
+          );
+
+
+        /* Send to other users */
+
+        socket
+          .to(roomId)
+          .emit(
+            "yjs-update",
+            update
+          );
+
+
+        /* =========================
+           SAVE TO MONGODB
+        ========================= */
+
+        let doc =
+          new Y.Doc();
+
+
+        const existing =
+          await Session.findOne({
+            roomId
+          });
+
+
+        if (
+          existing &&
+          existing.yjsState &&
+          existing.yjsState.length > 0
+        ) {
+
+          Y.applyUpdate(
+            doc,
+            new Uint8Array(
+              existing.yjsState
+            )
+          );
+
+        }
+
+
+        Y.applyUpdate(
+          doc,
+          new Uint8Array(
+            updateBytes
+          )
+        );
+
+
+        const fullState =
+          Y.encodeStateAsUpdate(
+            doc
+          );
+
+
+        await Session.findOneAndUpdate(
+          { roomId },
+
+          {
+            yjsState:
+              Buffer.from(
+                fullState
+              ),
+
+            updatedAt:
+              new Date()
+          },
+
+          {
+            upsert: true,
+            new: true
+          }
+        );
+
+
+      } catch (error) {
+
+        console.error(
+          "Yjs update error:",
+          error
+        );
+
+      }
+
+    }
+  );
+
+
+  /* =========================
+     CURSOR / AWARENESS
+  ========================= */
+
+  socket.on(
+    "awareness-update",
+    ({ roomId, awareness }) => {
+
+      if (!roomId) {
+        return;
+      }
+
+
+      socket
+        .to(roomId)
+        .emit(
+          "awareness-update",
+          {
+            id: socket.id,
+            ...awareness
+          }
+        );
+
+    }
+  );
+
+
+  /* =========================
+     DISCONNECT
+  ========================= */
+
+  socket.on(
+    "disconnect",
+    () => {
+
+      const roomId =
+        socket.data.roomId;
+
+
+      if (!roomId) {
+        return;
+      }
+
+
+      const room =
+        rooms.get(roomId);
+
+
+      if (!room) {
+        return;
+      }
+
+
+      room.delete(
+        socket.id
+      );
+
+
+      socket
+        .to(roomId)
+        .emit(
+          "awareness-remove",
+          socket.id
+        );
+
+
+      io.to(roomId).emit(
+        "users-update",
+        Array.from(
+          room.values()
+        )
+      );
+
+
+      if (room.size === 0) {
+
+        rooms.delete(
+          roomId
+        );
+
+      }
+
+
+      console.log(
+        "User disconnected:",
+        socket.id
+      );
+
+    }
+  );
+
+});
+
+
+/* =========================
+   START SERVER
+========================= */
+
+const PORT = 5000;
+
+server.listen(
+  PORT,
+  () => {
+
+    console.log(
+      `SyncSpace Server running at http://localhost:${PORT}`
+    );
+
+  }
+);
